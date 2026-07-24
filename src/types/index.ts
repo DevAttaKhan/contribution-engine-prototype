@@ -1,4 +1,8 @@
-export type ContributionMode = "EQUAL_SPLIT" | "OPEN" | "HYBRID";
+export type ContributionMode =
+  | "EQUAL_SPLIT"
+  | "OPEN"
+  | "HYBRID"
+  | "EQUAL_SHARE";
 export type PlanStatus = "DRAFT" | "PUBLISHED" | "SUPERSEDED";
 export type ParticipantStatus = "PENDING" | "PAID" | "CANCELLED" | "EXPIRED";
 export type PaymentStatus = "PENDING" | "COMPLETED" | "FAILED";
@@ -61,6 +65,24 @@ export type Contributor = {
   paidAt: string;
   planVersion: number;
   paymentId: string;
+  viaEqualShare?: boolean;
+};
+
+/** Immutable payment record — never deleted when contribution mode changes. */
+export type PaymentLedgerEntry = {
+  id: string;
+  bookingId: number;
+  amount: number;
+  payerName: string;
+  payerEmail: string;
+  paidAt: string;
+  method: "NAMED_PARTICIPANT" | "OPEN_LINK" | "EQUAL_SHARE";
+  methodLabel: string;
+  participantId?: string;
+  planId: string;
+  planVersion: number;
+  planMode: ContributionMode;
+  paymentId: string;
 };
 
 export type ContributionPlan = {
@@ -72,6 +94,9 @@ export type ContributionPlan = {
   bookingTotal: number;
   participants: Participant[];
   openLinkToken?: string;
+  equalShareCount?: number;
+  equalShareAmount?: number;
+  equalShareLinkToken?: string;
   contributors: Contributor[];
   createdAt: string;
   publishedAt?: string;
@@ -89,7 +114,8 @@ export type ActivityType =
   | "LINK_INVALIDATED"
   | "BOOKING_UPDATED"
   | "REMINDER_SENT"
-  | "INVITATION_SENT";
+  | "INVITATION_SENT"
+  | "MODE_CHANGED";
 
 export type ActivityEvent = {
   id: string;
@@ -131,6 +157,11 @@ export type LinkResolution =
       bookingId: number;
       plan: ContributionPlan;
     }
+  | {
+      kind: "equal_share";
+      bookingId: number;
+      plan: ContributionPlan;
+    }
   | null;
 
 export type PlanMetrics = {
@@ -141,6 +172,8 @@ export type PlanMetrics = {
   paidParticipants: number;
   pendingParticipants: number;
   openContributions: number;
+  equalSharePaidSlots?: number;
+  equalShareTotalSlots?: number;
 };
 
 export type ParticipantInput = {

@@ -19,3 +19,9 @@ export const distributeEqually = (totalAmount: number, count: number) => {
     fromCents(base + (index < remainder ? 1 : 0)),
   );
 };
+
+/** Fixed per-person share for shared equal-pay links (e.g. €400 / 40 = €10). */
+export const computeEqualShareAmount = (totalAmount: number, count: number) => {
+  if (count <= 0) return 0;
+  return fromCents(Math.floor(toCents(totalAmount) / count));
+};

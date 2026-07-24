@@ -30,6 +30,12 @@ type ParticipantsPanelProps = {
     phone?: string;
     allocatedAmount?: number;
   }) => void;
+  onAddPublishedParticipant: (participant: {
+    name: string;
+    email: string;
+    phone?: string;
+    allocatedAmount?: number;
+  }) => void;
   onRemoveParticipant: (participantId: string) => void;
   onRemovePublishedParticipant: (
     participantId: string,
@@ -44,6 +50,7 @@ export const ParticipantsPanel = ({
   plan,
   isDraft,
   onAddParticipant,
+  onAddPublishedParticipant,
   onRemoveParticipant,
   onRemovePublishedParticipant,
   onPublish,
@@ -108,12 +115,18 @@ export const ParticipantsPanel = ({
     }
 
     setAmountError("");
-    onAddParticipant({
+    const payload = {
       name: name.trim(),
       email: email.trim(),
       phone: phone.trim() || undefined,
       allocatedAmount: plan?.mode === "HYBRID" ? amount : undefined,
-    });
+    };
+
+    if (isDraft) {
+      onAddParticipant(payload);
+    } else {
+      onAddPublishedParticipant(payload);
+    }
 
     setName("");
     setEmail("");
@@ -165,9 +178,14 @@ export const ParticipantsPanel = ({
       0,
     );
 
-    if (Math.abs(allocationTotal - amountToRedistribute) > 0.01) {
+    if (allocations.some((allocation) => allocation.amount < 0)) {
+      setRemovalError("Amounts cannot be negative.");
+      return;
+    }
+
+    if (allocationTotal - amountToRedistribute > 0.01) {
       setRemovalError(
-        `Custom amounts must total €${amountToRedistribute.toFixed(2)}.`,
+        `Custom amounts cannot exceed €${amountToRedistribute.toFixed(2)}. Partial allocation is allowed.`,
       );
       return;
     }
@@ -180,28 +198,31 @@ export const ParticipantsPanel = ({
     handleCloseRemoval();
   };
 
-  if (!plan || plan.mode === "OPEN") {
+  if (!plan || plan.mode === "OPEN" || plan.mode === "EQUAL_SHARE") {
     return (
       <EmptyState
-        description="Equal Split participants are not used in Open Contribution mode."
+        description="Named participant management is not used for this contribution mode."
         icon={Users}
-        title="No participant tracking"
+        title="No named participant tracking"
       />
     );
   }
 
   return (
     <div className="space-y-6">
-      {isDraft ? (
+      {(isDraft || plan.status === "PUBLISHED") &&
+      (plan.mode === "EQUAL_SPLIT" || plan.mode === "HYBRID") ? (
         <Card>
           <CardHeader>
             <h3 className="text-lg font-semibold text-slate-900">
               Add participants
             </h3>
             <p className="text-sm text-slate-500">
-              {plan.mode === "HYBRID"
-                ? "Assign a fixed amount to each participant. The unallocated remainder is collected through the open link."
-                : "Participants are manually managed and the booking total is divided equally."}{" "}
+              {plan.status === "PUBLISHED"
+                ? "Adding after publish creates a new plan version and regenerates contribution links."
+                : plan.mode === "HYBRID"
+                  ? "Assign a fixed amount to each participant. The unallocated remainder is collected through the open link."
+                  : "Participants are manually managed and the booking total is divided equally."}{" "}
               Duplicate emails are prevented.
             </p>
           </CardHeader>
@@ -428,6 +449,7 @@ export const ParticipantsPanel = ({
           {amountToRedistribute > 0 ? (
             <Field
               htmlFor="removal-strategy"
+              hint="For custom amounts, you can assign only part of the unpaid balance."
               label="Redistribute their unpaid amount"
             >
               <Select

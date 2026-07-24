@@ -1,28 +1,32 @@
-import { ArrowLeft, Plus } from "lucide-react";
+import { ArrowLeft, Plus, Wallet } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import type { ContributionMode } from "../types";
 import { CreatePlanDialog } from "../features/plans/CreatePlanDialog";
 import { BookingOverview } from "../features/workspace/BookingOverview";
+import { EqualSharePanel } from "../features/workspace/EqualSharePanel";
 import { HistoryPanel } from "../features/workspace/HistoryPanel";
 import { OpenContributionPanel } from "../features/workspace/OpenContributionPanel";
 import { ParticipantsPanel } from "../features/workspace/ParticipantsPanel";
+import { PaymentsLedgerPanel } from "../features/workspace/PaymentsLedgerPanel";
 import { RecalculatePanel } from "../features/workspace/RecalculatePanel";
 import { VersionHistoryPanel } from "../features/workspace/VersionHistoryPanel";
 import {
   getActivePlan,
   getActivitiesForBooking,
   getBookingById,
+  getBookingTotal,
   getDraftPlan,
   getPlansForBooking,
   useContributionStore,
 } from "../store";
 import { Button, EmptyState, Tabs } from "../components/ui";
-import { Wallet } from "lucide-react";
 
 const workspaceTabs = [
   { id: "overview", label: "Overview" },
+  { id: "payments", label: "Payments" },
   { id: "participants", label: "Participants" },
+  { id: "equal-share", label: "Equal Share" },
   { id: "open", label: "Open Link" },
   { id: "recalculate", label: "Recalculate" },
   { id: "history", label: "History" },
@@ -46,19 +50,50 @@ export const BookingWorkspacePage = () => {
   const isDraft = workingPlan?.status === "DRAFT";
 
   const visibleTabs = useMemo(() => {
-    if (!workingPlan) return workspaceTabs.filter((tab) => tab.id === "overview");
-
-    if (workingPlan.mode === "OPEN") {
-      return workspaceTabs.filter((tab) => tab.id !== "participants");
+    if (!workingPlan) {
+      return workspaceTabs.filter((tab) => tab.id === "overview");
     }
 
-    return workspaceTabs;
+    // Payments ledger is always available once a plan exists.
+    const always = new Set(["overview", "payments", "recalculate", "history"]);
+
+    if (workingPlan.mode === "OPEN") {
+      return workspaceTabs.filter(
+        (tab) => always.has(tab.id) || tab.id === "open",
+      );
+    }
+
+    if (workingPlan.mode === "EQUAL_SHARE") {
+      return workspaceTabs.filter(
+        (tab) => always.has(tab.id) || tab.id === "equal-share",
+      );
+    }
+
+    if (workingPlan.mode === "EQUAL_SPLIT") {
+      return workspaceTabs.filter(
+        (tab) => always.has(tab.id) || tab.id === "participants",
+      );
+    }
+
+    // HYBRID
+    return workspaceTabs.filter(
+      (tab) =>
+        always.has(tab.id) || tab.id === "participants" || tab.id === "open",
+    );
   }, [workingPlan]);
 
-  const handleCreatePlan = (mode: ContributionMode) => {
-    dispatch({ type: "CREATE_PLAN", payload: { bookingId, mode } });
+  const handleCreatePlan = (
+    mode: ContributionMode,
+    equalShareCount?: number,
+  ) => {
+    dispatch({
+      type: "CREATE_PLAN",
+      payload: { bookingId, mode, equalShareCount },
+    });
     setCreatePlanOpen(false);
-    setActiveTab(mode === "OPEN" ? "open" : "participants");
+    if (mode === "OPEN") setActiveTab("open");
+    else if (mode === "EQUAL_SHARE") setActiveTab("equal-share");
+    else setActiveTab("participants");
   };
 
   const handleAddParticipant = (participant: {
@@ -69,7 +104,10 @@ export const BookingWorkspacePage = () => {
   }) => {
     const email = participant.email.trim().toLowerCase();
     const duplicate = workingPlan?.participants.some(
-      (entry) => entry.email === email,
+      (entry) =>
+        entry.email === email &&
+        entry.status !== "CANCELLED" &&
+        entry.status !== "EXPIRED",
     );
 
     if (duplicate) {
@@ -80,6 +118,32 @@ export const BookingWorkspacePage = () => {
     setDuplicateError("");
     dispatch({
       type: "ADD_PARTICIPANT",
+      payload: { bookingId, participant },
+    });
+  };
+
+  const handleAddPublishedParticipant = (participant: {
+    name: string;
+    email: string;
+    phone?: string;
+    allocatedAmount?: number;
+  }) => {
+    const email = participant.email.trim().toLowerCase();
+    const duplicate = workingPlan?.participants.some(
+      (entry) =>
+        entry.email === email &&
+        entry.status !== "CANCELLED" &&
+        entry.status !== "EXPIRED",
+    );
+
+    if (duplicate) {
+      setDuplicateError("A participant with this email already exists.");
+      return;
+    }
+
+    setDuplicateError("");
+    dispatch({
+      type: "ADD_PUBLISHED_PARTICIPANT",
       payload: { bookingId, participant },
     });
   };
@@ -133,7 +197,7 @@ export const BookingWorkspacePage = () => {
               Create contribution plan
             </Button>
           }
-          description="Choose Equal Split, Open Contribution, or Hybrid to start collecting payments."
+          description="Choose Equal Split, Equal Share Link, Open Contribution, or Hybrid to start collecting payments."
           icon={Wallet}
           title="No contribution plan yet"
         />
@@ -158,11 +222,16 @@ export const BookingWorkspacePage = () => {
             />
           ) : null}
 
+          {activeTab === "payments" ? (
+            <PaymentsLedgerPanel bookingId={bookingId} plan={workingPlan} />
+          ) : null}
+
           {activeTab === "participants" ? (
             <ParticipantsPanel
               duplicateError={duplicateError}
               isDraft={isDraft}
               onAddParticipant={handleAddParticipant}
+              onAddPublishedParticipant={handleAddPublishedParticipant}
               onPublish={() =>
                 dispatch({ type: "PUBLISH_PLAN", payload: { bookingId } })
               }
@@ -191,6 +260,22 @@ export const BookingWorkspacePage = () => {
             />
           ) : null}
 
+          {activeTab === "equal-share" ? (
+            <EqualSharePanel
+              isDraft={isDraft}
+              onPublish={() =>
+                dispatch({ type: "PUBLISH_PLAN", payload: { bookingId } })
+              }
+              onSetShareCount={(count) =>
+                dispatch({
+                  type: "SET_EQUAL_SHARE_COUNT",
+                  payload: { bookingId, equalShareCount: count },
+                })
+              }
+              plan={workingPlan}
+            />
+          ) : null}
+
           {activeTab === "open" ? (
             <div className="space-y-6">
               <OpenContributionPanel plan={workingPlan} />
@@ -211,14 +296,21 @@ export const BookingWorkspacePage = () => {
           {activeTab === "recalculate" ? (
             <div className="space-y-6">
               <RecalculatePanel
-                currentPrice={booking.price}
-                onRecalculateEqual={(newBookingTotal, includePaidParticipants) =>
+                currentPrice={getBookingTotal(booking)}
+                onRecalculateEqual={(
+                  newBookingTotal,
+                  includePaidParticipants,
+                  newMode,
+                  equalShareCount,
+                ) =>
                   dispatch({
                     type: "RECALCULATE_EQUAL",
                     payload: {
                       bookingId,
                       newBookingTotal,
                       includePaidParticipants,
+                      newMode,
+                      equalShareCount,
                     },
                   })
                 }
@@ -226,6 +318,8 @@ export const BookingWorkspacePage = () => {
                   allocations,
                   newBookingTotal,
                   includePaidParticipants,
+                  newMode,
+                  equalShareCount,
                 ) =>
                   dispatch({
                     type: "RECALCULATE_MANUAL",
@@ -234,6 +328,8 @@ export const BookingWorkspacePage = () => {
                       allocations,
                       newBookingTotal,
                       includePaidParticipants,
+                      newMode,
+                      equalShareCount,
                     },
                   })
                 }
@@ -250,6 +346,7 @@ export const BookingWorkspacePage = () => {
       )}
 
       <CreatePlanDialog
+        bookingTotal={getBookingTotal(booking)}
         onClose={() => setCreatePlanOpen(false)}
         onCreate={handleCreatePlan}
         open={createPlanOpen}

@@ -141,7 +141,18 @@ export const BookingOverview = ({
                   Remaining: <Money amount={metrics.remainingBalance} />
                 </span>
                 <span>Open contributions: {metrics.openContributions}</span>
+                {metrics.equalSharePaidSlots != null &&
+                metrics.equalShareTotalSlots != null ? (
+                  <span>
+                    Equal share slots: {metrics.equalSharePaidSlots}/
+                    {metrics.equalShareTotalSlots}
+                  </span>
+                ) : null}
               </div>
+              <p className="text-sm text-slate-500">
+                Tip: use the Payments tab for a full ledger of every payer across
+                all contribution types and plan versions.
+              </p>
             </CardContent>
           </Card>
         </>

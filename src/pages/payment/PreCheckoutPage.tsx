@@ -5,6 +5,7 @@ import { formatDate, formatTime } from "../../lib/format";
 import { formatCurrency } from "../../lib/money";
 import {
   getBookingById,
+  getEqualShareSlotsRemaining,
   getOpenContributionAvailable,
   getParticipantRemainingDue,
   getPlanMetrics,
@@ -12,7 +13,15 @@ import {
   useContributionStore,
 } from "../../store";
 import { Money } from "../../components/shared";
-import { Button, Card, CardContent, CardHeader, EmptyState, Field, Input } from "../../components/ui";
+import {
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  EmptyState,
+  Field,
+  Input,
+} from "../../components/ui";
 
 export const PreCheckoutPage = () => {
   const { token = "" } = useParams();
@@ -20,17 +29,12 @@ export const PreCheckoutPage = () => {
   const { state } = useContributionStore();
   const resolution = resolveLinkToken(state, token);
   const [openAmount, setOpenAmount] = useState("");
+  const [payerName, setPayerName] = useState("");
+  const [payerEmail, setPayerEmail] = useState("");
 
   const booking = resolution
     ? getBookingById(state, resolution.bookingId)
     : null;
-
-  const contributionAmount =
-    resolution?.kind === "participant"
-      ? getParticipantRemainingDue(resolution.participant)
-      : resolution
-        ? getPlanMetrics(resolution.plan).remainingBalance
-        : 0;
 
   if (!resolution || !booking) {
     return (
@@ -44,17 +48,62 @@ export const PreCheckoutPage = () => {
     );
   }
 
-  const isOpen = resolution.kind === "open";
-  const amount = isOpen ? Number(openAmount) || 0 : contributionAmount;
   const metrics = getPlanMetrics(resolution.plan);
   const openAvailable = getOpenContributionAvailable(resolution.plan);
+  const isOpen = resolution.kind === "open";
+  const isEqualShare = resolution.kind === "equal_share";
+  const equalShareAmount = resolution.plan.equalShareAmount ?? 0;
+  const equalSlotsRemaining = getEqualShareSlotsRemaining(resolution.plan);
+
+  const contributionAmount =
+    resolution.kind === "participant"
+      ? getParticipantRemainingDue(resolution.participant)
+      : isEqualShare
+        ? equalShareAmount
+        : metrics.remainingBalance;
+
+  const amount = isOpen ? Number(openAmount) || 0 : contributionAmount;
 
   const handleContinue = () => {
-    if (isOpen && (amount <= 0 || amount > openAvailable)) return;
+    if (isEqualShare) {
+      if (!payerName.trim() || !payerEmail.trim()) return;
+      if (equalSlotsRemaining <= 0) return;
+      navigate(`/contribute/${token}/checkout`, {
+        state: {
+          amount: equalShareAmount,
+          payerName: payerName.trim(),
+          payerEmail: payerEmail.trim(),
+        },
+      });
+      return;
+    }
+
+    if (isOpen) {
+      if (amount <= 0 || amount > openAvailable) return;
+      if (!payerName.trim() || !payerEmail.trim()) return;
+      navigate(`/contribute/${token}/checkout`, {
+        state: {
+          amount,
+          payerName: payerName.trim(),
+          payerEmail: payerEmail.trim(),
+        },
+      });
+      return;
+    }
+
     navigate(`/contribute/${token}/checkout`, {
       state: { amount, payerName: "", payerEmail: "" },
     });
   };
+
+  const continueDisabled = isEqualShare
+    ? !payerName.trim() || !payerEmail.trim() || equalSlotsRemaining <= 0
+    : isOpen
+      ? amount <= 0 ||
+        amount > openAvailable ||
+        !payerName.trim() ||
+        !payerEmail.trim()
+      : contributionAmount <= 0;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-2xl items-center px-4 py-12">
@@ -77,30 +126,88 @@ export const PreCheckoutPage = () => {
               {booking.pickup} → {booking.dropoff}
             </p>
             <p>
-              {formatDate(booking.trip_date)} at {formatTime(booking.pickup_time)}
+              {formatDate(booking.trip_date)} at{" "}
+              {formatTime(booking.pickup_time)}
             </p>
             <p className="mt-2">
               Outstanding balance: <Money amount={metrics.remainingBalance} />
             </p>
           </div>
 
+          {isEqualShare ? (
+            <>
+              <div className="rounded-xl border border-primary-200 bg-primary-50 p-4">
+                <p className="text-sm text-primary-700">Equal share amount</p>
+                <p className="mt-1 text-3xl font-bold text-primary-900">
+                  {formatCurrency(equalShareAmount)}
+                </p>
+                <p className="mt-1 text-sm text-primary-700">
+                  {equalSlotsRemaining} of {resolution.plan.equalShareCount}{" "}
+                  slots remaining
+                </p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field htmlFor="equal-payer-name" label="Your name">
+                  <Input
+                    id="equal-payer-name"
+                    onChange={(event) => setPayerName(event.target.value)}
+                    required
+                    value={payerName}
+                  />
+                </Field>
+                <Field htmlFor="equal-payer-email" label="Email">
+                  <Input
+                    id="equal-payer-email"
+                    onChange={(event) => setPayerEmail(event.target.value)}
+                    required
+                    type="email"
+                    value={payerEmail}
+                  />
+                </Field>
+              </div>
+            </>
+          ) : null}
+
           {isOpen ? (
-            <Field
-              hint={`Maximum available through this link: ${formatCurrency(openAvailable)}`}
-              htmlFor="open-amount"
-              label="Contribution amount"
-            >
-              <Input
-                id="open-amount"
-                max={openAvailable}
-                min="1"
-                onChange={(event) => setOpenAmount(event.target.value)}
-                step="0.01"
-                type="number"
-                value={openAmount}
-              />
-            </Field>
-          ) : (
+            <>
+              <Field
+                hint={`Maximum available through this link: ${formatCurrency(openAvailable)}`}
+                htmlFor="open-amount"
+                label="Contribution amount"
+              >
+                <Input
+                  id="open-amount"
+                  max={openAvailable}
+                  min="1"
+                  onChange={(event) => setOpenAmount(event.target.value)}
+                  step="0.01"
+                  type="number"
+                  value={openAmount}
+                />
+              </Field>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field htmlFor="open-payer-name" label="Your name">
+                  <Input
+                    id="open-payer-name"
+                    onChange={(event) => setPayerName(event.target.value)}
+                    required
+                    value={payerName}
+                  />
+                </Field>
+                <Field htmlFor="open-payer-email" label="Email">
+                  <Input
+                    id="open-payer-email"
+                    onChange={(event) => setPayerEmail(event.target.value)}
+                    required
+                    type="email"
+                    value={payerEmail}
+                  />
+                </Field>
+              </div>
+            </>
+          ) : null}
+
+          {resolution.kind === "participant" ? (
             <div className="rounded-xl border border-primary-200 bg-primary-50 p-4">
               <p className="text-sm text-primary-700">
                 {resolution.participant.paidAmount &&
@@ -119,16 +226,10 @@ export const PreCheckoutPage = () => {
                   : ""}
               </p>
             </div>
-          )}
+          ) : null}
 
           <div className="flex flex-wrap gap-3">
-            <Button
-              disabled={
-                isOpen &&
-                (amount <= 0 || amount > openAvailable)
-              }
-              onClick={handleContinue}
-            >
+            <Button disabled={continueDisabled} onClick={handleContinue}>
               Continue to payment
             </Button>
             <Link to="/">

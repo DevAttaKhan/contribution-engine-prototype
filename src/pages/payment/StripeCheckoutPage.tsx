@@ -28,7 +28,9 @@ export const StripeCheckoutPage = () => {
     locationState?.amount ??
     (resolution?.kind === "participant"
       ? getParticipantRemainingDue(resolution.participant)
-      : 0);
+      : resolution?.kind === "equal_share"
+        ? (resolution.plan.equalShareAmount ?? 0)
+        : 0);
 
   const handlePay = () => {
     if (simulateFailure) {
@@ -65,7 +67,7 @@ export const StripeCheckoutPage = () => {
           </p>
         </CardHeader>
         <CardContent className="space-y-4">
-          {resolution?.kind === "open" ? (
+          {resolution?.kind === "open" || resolution?.kind === "equal_share" ? (
             <>
               <Field htmlFor="payer-name" label="Your name">
                 <Input

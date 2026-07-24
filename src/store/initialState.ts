@@ -8,6 +8,7 @@ export const createInitialState = (): AppState => ({
   plans: [],
   activities: [],
   notifications: [],
+  paymentLedger: [],
 });
 
 export const loadState = (): AppState => {
@@ -17,7 +18,12 @@ export const loadState = (): AppState => {
   if (!stored) return createInitialState();
 
   try {
-    return JSON.parse(stored) as AppState;
+    const parsed = JSON.parse(stored) as AppState;
+    return {
+      ...createInitialState(),
+      ...parsed,
+      paymentLedger: parsed.paymentLedger ?? [],
+    };
   } catch {
     return createInitialState();
   }
