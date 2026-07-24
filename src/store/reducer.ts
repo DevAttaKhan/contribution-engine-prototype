@@ -8,6 +8,7 @@ import type {
   ManualAllocation,
   Participant,
   ParticipantInput,
+  ParticipantSource,
 } from "../types";
 import { createInitialState } from "./initialState";
 import type { AppState } from "./selectors";
@@ -18,6 +19,7 @@ import {
   getBookingTotal,
   getCollectedFromContributors,
   getCollectedFromParticipants,
+  getDraftPlan,
   getEqualSharePaidCount,
   getOpenContributionAvailable,
   getParticipantPaidAmount,
@@ -31,13 +33,16 @@ export type AppAction =
       type: "CREATE_PLAN";
       payload: {
         bookingId: number;
-        mode: ContributionMode;
         equalShareCount?: number;
       };
     }
   | {
       type: "SET_EQUAL_SHARE_COUNT";
       payload: { bookingId: number; equalShareCount: number };
+    }
+  | {
+      type: "SET_EQUAL_SHARE_AMOUNT";
+      payload: { bookingId: number; equalShareAmount: number };
     }
   | {
       type: "ADD_PARTICIPANT";
@@ -109,9 +114,46 @@ export type AppAction =
   | { type: "SEND_REMINDERS"; payload: { bookingId: number } }
   | { type: "SEND_INVITATIONS"; payload: { bookingId: number } }
   | { type: "MARK_NOTIFICATION_READ"; payload: { notificationId: string } }
-  | { type: "MARK_ALL_NOTIFICATIONS_READ" };
+  | { type: "MARK_ALL_NOTIFICATIONS_READ" }
+  | {
+      type: "UPDATE_PARTICIPANT_AMOUNT";
+      payload: {
+        bookingId: number;
+        participantId: string;
+        /** Absolute allocation when unpaid; additional top-up when already paid. */
+        amount: number;
+        note?: string;
+      };
+    }
+  | {
+      type: "REDISTRIBUTE_PARTICIPANTS_EQUAL";
+      payload: {
+        bookingId: number;
+        includePaidParticipants?: boolean;
+      };
+    }
+  | {
+      type: "REDISTRIBUTE_PARTICIPANTS_MANUAL";
+      payload: {
+        bookingId: number;
+        allocations: ManualAllocation[];
+        includePaidParticipants?: boolean;
+      };
+    };
 
 const now = () => new Date().toISOString();
+
+const planHasOpenLink = (mode: ContributionMode) =>
+  mode === "OPEN" || mode === "HYBRID" || mode === "UNIFIED";
+
+const planHasEqualShare = (mode: ContributionMode) =>
+  mode === "EQUAL_SHARE" || mode === "UNIFIED";
+
+const planSupportsNamedParticipants = (mode: ContributionMode) =>
+  mode === "EQUAL_SPLIT" || mode === "HYBRID" || mode === "UNIFIED";
+
+const isLegacyNamedOnlyMode = (mode: ContributionMode) =>
+  mode === "EQUAL_SPLIT" || mode === "HYBRID";
 
 const addActivity = (
   activities: ActivityEvent[],
@@ -158,6 +200,7 @@ const createParticipant = (
   input: ParticipantInput,
   amount: number,
   version: number,
+  source: ParticipantSource = "MANUAL",
 ): Participant => ({
   id: createId(),
   name: input.name.trim(),
@@ -167,7 +210,62 @@ const createParticipant = (
   status: "PENDING",
   linkToken: createToken(),
   planVersion: version,
+  source,
+  amountHistory: [],
 });
+
+const upsertLinkPayerParticipant = (
+  plan: ContributionPlan,
+  payerName: string,
+  payerEmail: string,
+  amount: number,
+  source: "OPEN_LINK" | "EQUAL_SHARE",
+): Participant[] => {
+  const email = payerEmail.trim().toLowerCase();
+  const existing = plan.participants.find(
+    (participant) =>
+      participant.email === email &&
+      participant.status !== "CANCELLED" &&
+      participant.status !== "EXPIRED",
+  );
+
+  if (existing) {
+    const previousPaid = getParticipantPaidAmount(existing);
+    const nextPaid = previousPaid + amount;
+    const allocatedAmount = Math.max(existing.allocatedAmount, nextPaid);
+    const remainingDue = Math.max(allocatedAmount - nextPaid, 0);
+
+    return plan.participants.map((participant) =>
+      participant.id === existing.id
+        ? {
+            ...participant,
+            allocatedAmount,
+            paidAmount: nextPaid,
+            paidAt: now(),
+            status: remainingDue > 0 ? ("PENDING" as const) : ("PAID" as const),
+            source: participant.source ?? source,
+          }
+        : participant,
+    );
+  }
+
+  return [
+    ...plan.participants,
+    {
+      id: createId(),
+      name: payerName.trim(),
+      email,
+      allocatedAmount: amount,
+      paidAmount: amount,
+      paidAt: now(),
+      status: "PAID" as const,
+      linkToken: createToken(),
+      planVersion: plan.version,
+      source,
+      amountHistory: [],
+    },
+  ];
+};
 
 const publishDraftPlan = (
   state: AppState,
@@ -179,14 +277,12 @@ const publishDraftPlan = (
     ...draft,
     status: "PUBLISHED",
     publishedAt: now(),
-    openLinkToken:
-      draft.mode === "OPEN" || draft.mode === "HYBRID"
-        ? createToken()
-        : undefined,
-    equalShareLinkToken:
-      draft.mode === "EQUAL_SHARE" ? createToken() : undefined,
+    openLinkToken: planHasOpenLink(draft.mode) ? createToken() : undefined,
+    equalShareLinkToken: planHasEqualShare(draft.mode)
+      ? createToken()
+      : undefined,
     equalShareAmount:
-      draft.mode === "EQUAL_SHARE" && draft.equalShareCount
+      planHasEqualShare(draft.mode) && draft.equalShareCount
         ? computeEqualShareAmount(draft.bookingTotal, draft.equalShareCount)
         : draft.equalShareAmount,
     participants: draft.participants.map((participant) => ({
@@ -237,30 +333,21 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           .length + 1;
 
       const bookingTotal = getBookingTotal(booking);
-      const equalShareCount =
-        action.payload.mode === "EQUAL_SHARE"
-          ? Math.max(1, action.payload.equalShareCount ?? 1)
-          : undefined;
+      const equalShareCount = Math.max(1, action.payload.equalShareCount ?? 40);
 
       const plan: ContributionPlan = {
         id: createId(),
         bookingId: action.payload.bookingId,
         version,
-        mode: action.payload.mode,
+        mode: "UNIFIED",
         status: "DRAFT",
         bookingTotal,
         participants: [],
         contributors: [],
         createdAt: now(),
         equalShareCount,
-        equalShareAmount:
-          equalShareCount != null
-            ? computeEqualShareAmount(bookingTotal, equalShareCount)
-            : undefined,
-        openLinkToken:
-          action.payload.mode === "OPEN" || action.payload.mode === "HYBRID"
-            ? createToken()
-            : undefined,
+        equalShareAmount: computeEqualShareAmount(bookingTotal, equalShareCount),
+        openLinkToken: createToken(),
       };
 
       return {
@@ -270,37 +357,145 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           state.activities,
           action.payload.bookingId,
           "PLAN_CREATED",
-          `Contribution plan v${version} created (${action.payload.mode.replace("_", " ").toLowerCase()}).`,
-          { version, mode: action.payload.mode },
+          `Contribution plan v${version} created.`,
+          { version, mode: "UNIFIED" },
         ),
       };
     }
 
     case "SET_EQUAL_SHARE_COUNT": {
-      const draft = state.plans.find(
-        (plan) =>
-          plan.bookingId === action.payload.bookingId &&
-          plan.status === "DRAFT" &&
-          plan.mode === "EQUAL_SHARE",
-      );
-      if (!draft) return state;
+      const workingPlan =
+        getDraftPlan(state, action.payload.bookingId) ??
+        getActivePlan(state, action.payload.bookingId);
+      if (!workingPlan || !planHasEqualShare(workingPlan.mode)) return state;
 
       const equalShareCount = Math.max(1, Math.floor(action.payload.equalShareCount));
+      const equalShareAmount = computeEqualShareAmount(
+        workingPlan.bookingTotal,
+        equalShareCount,
+      );
+
+      if (workingPlan.status === "DRAFT") {
+        return {
+          ...state,
+          plans: state.plans.map((plan) =>
+            plan.id === workingPlan.id
+              ? { ...plan, equalShareCount, equalShareAmount }
+              : plan,
+          ),
+        };
+      }
+
+      const nextVersion = workingPlan.version + 1;
+      const nextPlan: ContributionPlan = {
+        ...workingPlan,
+        id: createId(),
+        version: nextVersion,
+        status: "DRAFT",
+        createdAt: now(),
+        publishedAt: undefined,
+        equalShareCount,
+        equalShareAmount,
+        equalShareLinkToken: createToken(),
+        openLinkToken: planHasOpenLink(workingPlan.mode)
+          ? createToken()
+          : undefined,
+      };
+
+      const supersededPlans = supersedePublishedPlans(
+        state.plans,
+        action.payload.bookingId,
+      );
+      const published = publishDraftPlan(
+        { ...state, plans: [...supersededPlans, nextPlan] },
+        action.payload.bookingId,
+        nextPlan,
+      );
 
       return {
         ...state,
-        plans: state.plans.map((plan) =>
-          plan.id === draft.id
-            ? {
-                ...plan,
-                equalShareCount,
-                equalShareAmount: computeEqualShareAmount(
-                  plan.bookingTotal,
-                  equalShareCount,
-                ),
-              }
-            : plan,
+        plans: published.plans,
+        activities: addActivity(
+          published.activities,
+          action.payload.bookingId,
+          "RECALCULATION",
+          `Equal share headcount updated to ${equalShareCount} (€${equalShareAmount.toFixed(2)} each) in plan v${nextVersion}.`,
+          { version: nextVersion },
         ),
+        notifications: published.notifications,
+      };
+    }
+
+    case "SET_EQUAL_SHARE_AMOUNT": {
+      const workingPlan =
+        getDraftPlan(state, action.payload.bookingId) ??
+        getActivePlan(state, action.payload.bookingId);
+      if (!workingPlan || !planHasEqualShare(workingPlan.mode)) return state;
+
+      const equalShareAmount = action.payload.equalShareAmount;
+      if (!Number.isFinite(equalShareAmount) || equalShareAmount <= 0) {
+        return state;
+      }
+
+      const equalShareCount = Math.max(
+        1,
+        Math.floor(workingPlan.bookingTotal / equalShareAmount) || 1,
+      );
+
+      if (workingPlan.status === "DRAFT") {
+        return {
+          ...state,
+          plans: state.plans.map((plan) =>
+            plan.id === workingPlan.id
+              ? { ...plan, equalShareAmount, equalShareCount }
+              : plan,
+          ),
+          activities: addActivity(
+            state.activities,
+            action.payload.bookingId,
+            "RECALCULATION",
+            `Equal share amount set to €${equalShareAmount.toFixed(2)} (${equalShareCount} slots).`,
+          ),
+        };
+      }
+
+      const nextVersion = workingPlan.version + 1;
+      const nextPlan: ContributionPlan = {
+        ...workingPlan,
+        id: createId(),
+        version: nextVersion,
+        status: "DRAFT",
+        createdAt: now(),
+        publishedAt: undefined,
+        equalShareAmount,
+        equalShareCount,
+        equalShareLinkToken: createToken(),
+        openLinkToken: planHasOpenLink(workingPlan.mode)
+          ? createToken()
+          : undefined,
+      };
+
+      const supersededPlans = supersedePublishedPlans(
+        state.plans,
+        action.payload.bookingId,
+      );
+      const published = publishDraftPlan(
+        { ...state, plans: [...supersededPlans, nextPlan] },
+        action.payload.bookingId,
+        nextPlan,
+      );
+
+      return {
+        ...state,
+        plans: published.plans,
+        activities: addActivity(
+          published.activities,
+          action.payload.bookingId,
+          "RECALCULATION",
+          `Equal share amount updated to €${equalShareAmount.toFixed(2)} in plan v${nextVersion}. Previous equal share link invalidated.`,
+          { version: nextVersion },
+        ),
+        notifications: published.notifications,
       };
     }
 
@@ -310,7 +505,7 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           plan.bookingId === action.payload.bookingId &&
           plan.status === "DRAFT",
       );
-      if (!draft || draft.mode === "OPEN" || draft.mode === "EQUAL_SHARE") {
+      if (!draft || !planSupportsNamedParticipants(draft.mode)) {
         return state;
       }
 
@@ -320,42 +515,41 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
       );
       if (duplicate) return state;
 
-      const participants = [
-        ...draft.participants,
-        createParticipant(
-          action.payload.participant,
-          draft.mode === "HYBRID"
-            ? (action.payload.participant.allocatedAmount ?? 0)
-            : 0,
-          draft.version,
-        ),
-      ];
+      const amount = action.payload.participant.allocatedAmount ?? 0;
 
-      const hybridAllocatedTotal = participants.reduce(
-        (total, participant) => total + participant.allocatedAmount,
-        0,
-      );
-      if (
-        draft.mode === "HYBRID" &&
-        ((action.payload.participant.allocatedAmount ?? 0) <= 0 ||
-          hybridAllocatedTotal > draft.bookingTotal)
-      ) {
-        return state;
+      if (draft.mode === "HYBRID") {
+        if (amount <= 0) return state;
+        const hybridAllocatedTotal =
+          draft.participants.reduce(
+            (total, participant) => total + participant.allocatedAmount,
+            0,
+          ) + amount;
+        if (hybridAllocatedTotal > draft.bookingTotal) return state;
       }
 
-      const updatedParticipants =
-        draft.mode === "HYBRID"
-          ? participants
-          : (() => {
-              const amounts = distributeEqually(
-                draft.bookingTotal,
-                participants.length,
-              );
-              return participants.map((participant, index) => ({
-                ...participant,
-                allocatedAmount: amounts[index] ?? 0,
-              }));
-            })();
+      let updatedParticipants: Participant[];
+
+      if (draft.mode === "EQUAL_SPLIT") {
+        const participants = [
+          ...draft.participants,
+          createParticipant(action.payload.participant, 0, draft.version, "MANUAL"),
+        ];
+        const amounts = distributeEqually(draft.bookingTotal, participants.length);
+        updatedParticipants = participants.map((participant, index) => ({
+          ...participant,
+          allocatedAmount: amounts[index] ?? 0,
+        }));
+      } else {
+        updatedParticipants = [
+          ...draft.participants,
+          createParticipant(
+            action.payload.participant,
+            draft.mode === "HYBRID" ? amount : amount,
+            draft.version,
+            "MANUAL",
+          ),
+        ];
+      }
 
       return {
         ...state,
@@ -525,10 +719,12 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           ...alreadyRemovedParticipants,
           cancelledParticipant,
         ],
-        openLinkToken:
-          activePlan.mode === "OPEN" || activePlan.mode === "HYBRID"
+        openLinkToken: planHasOpenLink(activePlan.mode)
             ? createToken()
             : undefined,
+        equalShareLinkToken: planHasEqualShare(activePlan.mode)
+          ? createToken()
+          : undefined,
       };
       const supersededPlans = supersedePublishedPlans(
         state.plans,
@@ -572,8 +768,7 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
       if (
         !activePlan ||
         activePlan.status !== "PUBLISHED" ||
-        activePlan.mode === "OPEN" ||
-        activePlan.mode === "EQUAL_SHARE"
+        !planSupportsNamedParticipants(activePlan.mode)
       ) {
         return state;
       }
@@ -617,6 +812,23 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           action.payload.participant,
           amount,
           nextVersion,
+          "MANUAL",
+        );
+        updatedPending = [
+          ...pendingParticipants.map((participant) => ({
+            ...participant,
+            linkToken: createToken(),
+            planVersion: nextVersion,
+          })),
+          newParticipant,
+        ];
+      } else if (activePlan.mode === "UNIFIED") {
+        const amount = action.payload.participant.allocatedAmount ?? 0;
+        newParticipant = createParticipant(
+          action.payload.participant,
+          amount,
+          nextVersion,
+          "MANUAL",
         );
         updatedPending = [
           ...pendingParticipants.map((participant) => ({
@@ -667,8 +879,12 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           ...updatedPending,
           ...otherParticipants,
         ],
-        openLinkToken:
-          activePlan.mode === "HYBRID" ? createToken() : undefined,
+        openLinkToken: planHasOpenLink(activePlan.mode)
+          ? createToken()
+          : undefined,
+        equalShareLinkToken: planHasEqualShare(activePlan.mode)
+          ? createToken()
+          : undefined,
       };
 
       const supersededPlans = supersedePublishedPlans(
@@ -709,7 +925,7 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
       if (!draft) return state;
 
       if (
-        (draft.mode === "EQUAL_SPLIT" || draft.mode === "HYBRID") &&
+        isLegacyNamedOnlyMode(draft.mode) &&
         draft.participants.length === 0
       ) {
         return state;
@@ -751,9 +967,7 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
             message: `Contribution link generated for ${participant.name}.`,
             timestamp: now(),
           })),
-          ...(draft.openLinkToken ||
-          draft.mode === "OPEN" ||
-          draft.mode === "HYBRID"
+          ...(planHasOpenLink(draft.mode)
             ? [
                 {
                   id: createId(),
@@ -764,7 +978,7 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
                 },
               ]
             : []),
-          ...(draft.mode === "EQUAL_SHARE"
+          ...(planHasEqualShare(draft.mode)
             ? [
                 {
                   id: createId(),
@@ -804,6 +1018,13 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
                   ...plan,
                   bookingTotal:
                     action.payload.price ?? getBookingTotal(booking),
+                  equalShareAmount:
+                    plan.equalShareCount != null
+                      ? computeEqualShareAmount(
+                          action.payload.price ?? getBookingTotal(booking),
+                          plan.equalShareCount,
+                        )
+                      : plan.equalShareAmount,
                 }
               : plan,
           )
@@ -1285,7 +1506,17 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
 
         const updatedPlans = state.plans.map((entry) =>
           entry.id === plan.id
-            ? { ...entry, contributors: [...entry.contributors, contributor] }
+            ? {
+                ...entry,
+                contributors: [...entry.contributors, contributor],
+                participants: upsertLinkPayerParticipant(
+                  entry,
+                  payerName,
+                  payerEmail,
+                  amount,
+                  "EQUAL_SHARE",
+                ),
+              }
             : entry,
         );
 
@@ -1335,7 +1566,17 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
 
       const updatedPlans = state.plans.map((entry) =>
         entry.id === plan.id
-          ? { ...entry, contributors: [...entry.contributors, contributor] }
+          ? {
+              ...entry,
+              contributors: [...entry.contributors, contributor],
+              participants: upsertLinkPayerParticipant(
+                entry,
+                contributor.name,
+                contributor.email,
+                amount,
+                "OPEN_LINK",
+              ),
+            }
           : entry,
       );
 
@@ -1454,6 +1695,369 @@ export const appReducer = (state: AppState, action: AppAction): AppState => {
           read: true,
         })),
       };
+
+    case "UPDATE_PARTICIPANT_AMOUNT": {
+      const workingPlan =
+        getDraftPlan(state, action.payload.bookingId) ??
+        getActivePlan(state, action.payload.bookingId);
+      if (!workingPlan) return state;
+
+      const participant = workingPlan.participants.find(
+        (entry) => entry.id === action.payload.participantId,
+      );
+      if (
+        !participant ||
+        participant.status === "CANCELLED" ||
+        participant.status === "EXPIRED"
+      ) {
+        return state;
+      }
+
+      const inputAmount = action.payload.amount;
+      if (!Number.isFinite(inputAmount) || inputAmount < 0) return state;
+
+      const previousAmount = participant.allocatedAmount;
+      const paidAmount = getParticipantPaidAmount(participant);
+      const hasPaidPortion = paidAmount > 0.001;
+
+      // Already paid (fully or partially): entered amount is an ADDITIONAL
+      // top-up. Paid credit stays; new outstanding = entered amount.
+      // Example: paid €20, enter €20 → allocation €40, due €20, new link.
+      const additionalAmount = hasPaidPortion ? inputAmount : undefined;
+      const newAmount = hasPaidPortion
+        ? paidAmount + inputAmount
+        : inputAmount;
+
+      if (Math.abs(previousAmount - newAmount) < 0.001 && !hasPaidPortion) {
+        return state;
+      }
+
+      // Re-charging the same additional amount is allowed even if totals match.
+      if (
+        hasPaidPortion &&
+        Math.abs(previousAmount - newAmount) < 0.001 &&
+        inputAmount <= 0
+      ) {
+        return state;
+      }
+
+      const remainingDue = Math.max(newAmount - paidAmount, 0);
+      const historyEntry = {
+        id: createId(),
+        previousAmount,
+        newAmount,
+        previousPaidAmount: paidAmount > 0 ? paidAmount : undefined,
+        additionalAmount,
+        changedAt: now(),
+        note: action.payload.note,
+      };
+
+      const updatedParticipant: Participant = {
+        ...participant,
+        allocatedAmount: newAmount,
+        paidAmount: paidAmount > 0 ? paidAmount : undefined,
+        status: remainingDue > 0.001 ? "PENDING" : "PAID",
+        linkToken:
+          remainingDue > 0.001 ? createToken() : participant.linkToken,
+        source: participant.source ?? "MANUAL",
+        amountHistory: [...(participant.amountHistory ?? []), historyEntry],
+      };
+
+      const applyAmountUpdate = (plan: ContributionPlan): ContributionPlan => ({
+        ...plan,
+        participants: plan.participants.map((entry) =>
+          entry.id === participant.id ? updatedParticipant : entry,
+        ),
+      });
+
+      const activityMessage = hasPaidPortion
+        ? `${participant.name}: additional €${inputAmount.toFixed(2)} outstanding created (paid €${paidAmount.toFixed(2)} kept; new total €${newAmount.toFixed(2)}).`
+        : `${participant.name}'s contribution amount changed from €${previousAmount.toFixed(2)} to €${newAmount.toFixed(2)}.`;
+
+      if (workingPlan.status === "DRAFT") {
+        return {
+          ...state,
+          plans: state.plans.map((plan) =>
+            plan.id === workingPlan.id ? applyAmountUpdate(plan) : plan,
+          ),
+          activities: addActivity(
+            state.activities,
+            action.payload.bookingId,
+            "AMOUNT_CHANGED",
+            activityMessage,
+            { participantId: participant.id },
+          ),
+        };
+      }
+
+      const nextVersion = workingPlan.version + 1;
+      const nextPlan: ContributionPlan = {
+        ...applyAmountUpdate(workingPlan),
+        id: createId(),
+        version: nextVersion,
+        status: "DRAFT",
+        createdAt: now(),
+        publishedAt: undefined,
+        participants: workingPlan.participants.map((entry) =>
+          entry.id === participant.id
+            ? { ...updatedParticipant, planVersion: nextVersion }
+            : {
+                ...entry,
+                planVersion: nextVersion,
+                linkToken:
+                  entry.status === "PENDING" ? createToken() : entry.linkToken,
+              },
+        ),
+        openLinkToken: planHasOpenLink(workingPlan.mode)
+          ? createToken()
+          : undefined,
+        equalShareLinkToken: planHasEqualShare(workingPlan.mode)
+          ? createToken()
+          : undefined,
+      };
+
+      const supersededPlans = supersedePublishedPlans(
+        state.plans,
+        action.payload.bookingId,
+      );
+      const published = publishDraftPlan(
+        { ...state, plans: [...supersededPlans, nextPlan] },
+        action.payload.bookingId,
+        nextPlan,
+      );
+
+      return {
+        ...state,
+        plans: published.plans,
+        activities: addActivity(
+          published.activities,
+          action.payload.bookingId,
+          "AMOUNT_CHANGED",
+          `${activityMessage} Plan updated to v${nextVersion} with a new payment link.`,
+          { participantId: participant.id, version: nextVersion },
+        ),
+        notifications: published.notifications,
+      };
+    }
+
+    case "REDISTRIBUTE_PARTICIPANTS_EQUAL":
+    case "REDISTRIBUTE_PARTICIPANTS_MANUAL": {
+      const workingPlan =
+        getDraftPlan(state, action.payload.bookingId) ??
+        getActivePlan(state, action.payload.bookingId);
+      if (!workingPlan || !planSupportsNamedParticipants(workingPlan.mode)) {
+        return state;
+      }
+
+      const activeParticipants = workingPlan.participants.filter(
+        (participant) =>
+          participant.status !== "CANCELLED" &&
+          participant.status !== "EXPIRED",
+      );
+      const pendingParticipants = activeParticipants.filter(
+        (participant) => participant.status === "PENDING",
+      );
+      const paidParticipants = activeParticipants.filter(
+        (participant) => participant.status === "PAID",
+      );
+      const includePaid = Boolean(action.payload.includePaidParticipants);
+      const openCollected = getCollectedFromContributors(
+        workingPlan.contributors,
+      );
+      const paidCollected = getCollectedFromParticipants(activeParticipants);
+
+      const redistributionTargets = includePaid
+        ? activeParticipants
+        : pendingParticipants;
+
+      const redistributionPool = includePaid
+        ? Math.max(workingPlan.bookingTotal - openCollected, 0)
+        : Math.max(workingPlan.bookingTotal - paidCollected - openCollected, 0);
+
+      if (redistributionTargets.length === 0 || redistributionPool < 0) {
+        return state;
+      }
+
+      if (!includePaid && redistributionPool <= 0) {
+        return state;
+      }
+
+      let updatedTargets: Participant[];
+
+      if (action.type === "REDISTRIBUTE_PARTICIPANTS_MANUAL") {
+        const allocationMap = new Map(
+          action.payload.allocations.map((allocation) => [
+            allocation.participantId,
+            allocation.amount,
+          ]),
+        );
+        const manualTotal = action.payload.allocations.reduce(
+          (total, allocation) => total + allocation.amount,
+          0,
+        );
+
+        if (
+          action.payload.allocations.some((allocation) => allocation.amount < 0) ||
+          manualTotal - redistributionPool > 0.01
+        ) {
+          return state;
+        }
+
+        updatedTargets = redistributionTargets.map((participant) => {
+          const allocatedAmount =
+            allocationMap.get(participant.id) ?? participant.allocatedAmount;
+          const paidAmount = getParticipantPaidAmount(participant);
+          const remainingDue = Math.max(allocatedAmount - paidAmount, 0);
+          const previousAmount = participant.allocatedAmount;
+          const historyEntry =
+            Math.abs(previousAmount - allocatedAmount) > 0.001
+              ? {
+                  id: createId(),
+                  previousAmount,
+                  newAmount: allocatedAmount,
+                  previousPaidAmount: paidAmount > 0 ? paidAmount : undefined,
+                  changedAt: now(),
+                  note: includePaid
+                    ? "Redistributed (including paid participants)"
+                    : "Redistributed among pending participants",
+                }
+              : null;
+
+          return {
+            ...participant,
+            allocatedAmount,
+            paidAmount: paidAmount > 0 ? paidAmount : undefined,
+            status: remainingDue > 0.001 ? ("PENDING" as const) : ("PAID" as const),
+            linkToken: remainingDue > 0.001 ? createToken() : participant.linkToken,
+            amountHistory: historyEntry
+              ? [...(participant.amountHistory ?? []), historyEntry]
+              : participant.amountHistory,
+          };
+        });
+      } else {
+        const amounts = distributeEqually(
+          redistributionPool,
+          redistributionTargets.length,
+        );
+        updatedTargets = redistributionTargets.map((participant, index) => {
+          const allocatedAmount = amounts[index] ?? 0;
+          const paidAmount = getParticipantPaidAmount(participant);
+          const remainingDue = Math.max(allocatedAmount - paidAmount, 0);
+          const previousAmount = participant.allocatedAmount;
+          const historyEntry =
+            Math.abs(previousAmount - allocatedAmount) > 0.001
+              ? {
+                  id: createId(),
+                  previousAmount,
+                  newAmount: allocatedAmount,
+                  previousPaidAmount: paidAmount > 0 ? paidAmount : undefined,
+                  changedAt: now(),
+                  note: includePaid
+                    ? "Equal redistribute (including paid)"
+                    : "Equal redistribute (pending only)",
+                }
+              : null;
+
+          return {
+            ...participant,
+            allocatedAmount,
+            paidAmount: paidAmount > 0 ? paidAmount : undefined,
+            status: remainingDue > 0.001 ? ("PENDING" as const) : ("PAID" as const),
+            linkToken: remainingDue > 0.001 ? createToken() : participant.linkToken,
+            amountHistory: historyEntry
+              ? [...(participant.amountHistory ?? []), historyEntry]
+              : participant.amountHistory,
+          };
+        });
+      }
+
+      const targetIds = new Set(updatedTargets.map((participant) => participant.id));
+      const preservedPaid = includePaid
+        ? []
+        : paidParticipants;
+      const nextParticipants = [
+        ...preservedPaid,
+        ...updatedTargets,
+        ...workingPlan.participants.filter(
+          (participant) =>
+            (participant.status === "CANCELLED" ||
+              participant.status === "EXPIRED") &&
+            !targetIds.has(participant.id),
+        ),
+      ];
+
+      // Keep original order where possible for active participants.
+      const nextById = new Map(
+        nextParticipants.map((participant) => [participant.id, participant]),
+      );
+      const orderedParticipants = workingPlan.participants.map(
+        (participant) => nextById.get(participant.id) ?? participant,
+      );
+
+      const scopeLabel = includePaid
+        ? "all participants (including those who already paid)"
+        : "pending participants";
+
+      if (workingPlan.status === "DRAFT") {
+        return {
+          ...state,
+          plans: state.plans.map((plan) =>
+            plan.id === workingPlan.id
+              ? { ...plan, participants: orderedParticipants }
+              : plan,
+          ),
+          activities: addActivity(
+            state.activities,
+            action.payload.bookingId,
+            "RECALCULATION",
+            `Participant amounts redistributed across ${scopeLabel}.`,
+          ),
+        };
+      }
+
+      const nextVersion = workingPlan.version + 1;
+      const nextPlan: ContributionPlan = {
+        ...workingPlan,
+        id: createId(),
+        version: nextVersion,
+        status: "DRAFT",
+        createdAt: now(),
+        publishedAt: undefined,
+        participants: orderedParticipants.map((participant) => ({
+          ...participant,
+          planVersion: nextVersion,
+        })),
+        openLinkToken: planHasOpenLink(workingPlan.mode)
+          ? createToken()
+          : undefined,
+        equalShareLinkToken: planHasEqualShare(workingPlan.mode)
+          ? createToken()
+          : undefined,
+      };
+
+      const supersededPlans = supersedePublishedPlans(
+        state.plans,
+        action.payload.bookingId,
+      );
+      const published = publishDraftPlan(
+        { ...state, plans: [...supersededPlans, nextPlan] },
+        action.payload.bookingId,
+        nextPlan,
+      );
+
+      return {
+        ...state,
+        plans: published.plans,
+        activities: addActivity(
+          published.activities,
+          action.payload.bookingId,
+          "RECALCULATION",
+          `Participant amounts redistributed across ${scopeLabel} in plan v${nextVersion}. Previous links invalidated.`,
+          { version: nextVersion, includePaidParticipants: includePaid },
+        ),
+        notifications: published.notifications,
+      };
+    }
 
     default:
       return state;

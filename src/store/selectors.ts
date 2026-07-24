@@ -227,11 +227,32 @@ export const createLedgerEntry = (input: {
   paymentId: input.paymentId,
 });
 
-export const getEqualSharePaidCount = (plan: ContributionPlan) =>
-  plan.contributors.filter((contributor) => contributor.viaEqualShare).length;
+export const getEqualSharePaidCount = (plan: ContributionPlan) => {
+  const emails = new Set<string>();
+
+  plan.contributors
+    .filter((contributor) => contributor.viaEqualShare)
+    .forEach((contributor) => emails.add(contributor.email.toLowerCase()));
+
+  plan.participants
+    .filter(
+      (participant) =>
+        participant.source === "EQUAL_SHARE" &&
+        getParticipantPaidAmount(participant) > 0,
+    )
+    .forEach((participant) => emails.add(participant.email.toLowerCase()));
+
+  return emails.size;
+};
 
 export const getEqualShareSlotsRemaining = (plan: ContributionPlan) => {
-  if (plan.mode !== "EQUAL_SHARE" || !plan.equalShareCount) return 0;
+  if (
+    (plan.mode !== "EQUAL_SHARE" && plan.mode !== "UNIFIED") ||
+    !plan.equalShareCount
+  ) {
+    return 0;
+  }
+
   return Math.max(plan.equalShareCount - getEqualSharePaidCount(plan), 0);
 };
 
@@ -242,7 +263,11 @@ export const getTotalCollectedForPlan = (plan: ContributionPlan) =>
 export const getOpenContributionAvailable = (plan: ContributionPlan) => {
   const totalCollected = getTotalCollectedForPlan(plan);
 
-  if (plan.mode === "OPEN" || plan.mode === "EQUAL_SHARE") {
+  if (
+    plan.mode === "OPEN" ||
+    plan.mode === "EQUAL_SHARE" ||
+    plan.mode === "UNIFIED"
+  ) {
     return Math.max(plan.bookingTotal - totalCollected, 0);
   }
 

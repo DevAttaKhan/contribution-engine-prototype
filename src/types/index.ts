@@ -2,10 +2,26 @@ export type ContributionMode =
   | "EQUAL_SPLIT"
   | "OPEN"
   | "HYBRID"
-  | "EQUAL_SHARE";
+  | "EQUAL_SHARE"
+  | "UNIFIED";
 export type PlanStatus = "DRAFT" | "PUBLISHED" | "SUPERSEDED";
 export type ParticipantStatus = "PENDING" | "PAID" | "CANCELLED" | "EXPIRED";
+export type ParticipantSource =
+  | "MANUAL"
+  | "OPEN_LINK"
+  | "EQUAL_SHARE"
+  | "NAMED_LINK";
 export type PaymentStatus = "PENDING" | "COMPLETED" | "FAILED";
+
+export type AmountHistoryEntry = {
+  id: string;
+  previousAmount: number;
+  newAmount: number;
+  previousPaidAmount?: number;
+  additionalAmount?: number;
+  changedAt: string;
+  note?: string;
+};
 
 export type BookingUser = {
   id: number;
@@ -55,6 +71,8 @@ export type Participant = {
   paidAmount?: number;
   paidAt?: string;
   planVersion: number;
+  source?: ParticipantSource;
+  amountHistory?: AmountHistoryEntry[];
 };
 
 export type Contributor = {
@@ -115,7 +133,8 @@ export type ActivityType =
   | "BOOKING_UPDATED"
   | "REMINDER_SENT"
   | "INVITATION_SENT"
-  | "MODE_CHANGED";
+  | "MODE_CHANGED"
+  | "AMOUNT_CHANGED";
 
 export type ActivityEvent = {
   id: string;

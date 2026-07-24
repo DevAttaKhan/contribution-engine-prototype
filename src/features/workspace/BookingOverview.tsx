@@ -115,8 +115,11 @@ export const BookingOverview = ({
                   Contribution progress
                 </h3>
                 <p className="text-sm text-slate-500">
-                  Plan v{plan.version} · {plan.mode.replaceAll("_", " ")} ·{" "}
-                  {plan.status}
+                  Plan v{plan.version} ·{" "}
+                  {plan.mode === "UNIFIED"
+                    ? "Open + equal share + named"
+                    : plan.mode.replaceAll("_", " ")}{" "}
+                  · {plan.status}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">

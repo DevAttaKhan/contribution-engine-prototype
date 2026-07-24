@@ -1,12 +1,10 @@
 import { ArrowLeft, Plus, Wallet } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Link, useParams } from "react-router";
-import type { ContributionMode } from "../types";
 import { CreatePlanDialog } from "../features/plans/CreatePlanDialog";
 import { BookingOverview } from "../features/workspace/BookingOverview";
-import { EqualSharePanel } from "../features/workspace/EqualSharePanel";
+import { ContributionLinksPanel } from "../features/workspace/ContributionLinksPanel";
 import { HistoryPanel } from "../features/workspace/HistoryPanel";
-import { OpenContributionPanel } from "../features/workspace/OpenContributionPanel";
 import { ParticipantsPanel } from "../features/workspace/ParticipantsPanel";
 import { PaymentsLedgerPanel } from "../features/workspace/PaymentsLedgerPanel";
 import { RecalculatePanel } from "../features/workspace/RecalculatePanel";
@@ -26,8 +24,7 @@ const workspaceTabs = [
   { id: "overview", label: "Overview" },
   { id: "payments", label: "Payments" },
   { id: "participants", label: "Participants" },
-  { id: "equal-share", label: "Equal Share" },
-  { id: "open", label: "Open Link" },
+  { id: "links", label: "Links" },
   { id: "recalculate", label: "Recalculate" },
   { id: "history", label: "History" },
 ];
@@ -49,51 +46,13 @@ export const BookingWorkspacePage = () => {
 
   const isDraft = workingPlan?.status === "DRAFT";
 
-  const visibleTabs = useMemo(() => {
-    if (!workingPlan) {
-      return workspaceTabs.filter((tab) => tab.id === "overview");
-    }
-
-    // Payments ledger is always available once a plan exists.
-    const always = new Set(["overview", "payments", "recalculate", "history"]);
-
-    if (workingPlan.mode === "OPEN") {
-      return workspaceTabs.filter(
-        (tab) => always.has(tab.id) || tab.id === "open",
-      );
-    }
-
-    if (workingPlan.mode === "EQUAL_SHARE") {
-      return workspaceTabs.filter(
-        (tab) => always.has(tab.id) || tab.id === "equal-share",
-      );
-    }
-
-    if (workingPlan.mode === "EQUAL_SPLIT") {
-      return workspaceTabs.filter(
-        (tab) => always.has(tab.id) || tab.id === "participants",
-      );
-    }
-
-    // HYBRID
-    return workspaceTabs.filter(
-      (tab) =>
-        always.has(tab.id) || tab.id === "participants" || tab.id === "open",
-    );
-  }, [workingPlan]);
-
-  const handleCreatePlan = (
-    mode: ContributionMode,
-    equalShareCount?: number,
-  ) => {
+  const handleCreatePlan = (equalShareCount?: number) => {
     dispatch({
       type: "CREATE_PLAN",
-      payload: { bookingId, mode, equalShareCount },
+      payload: { bookingId, equalShareCount },
     });
     setCreatePlanOpen(false);
-    if (mode === "OPEN") setActiveTab("open");
-    else if (mode === "EQUAL_SHARE") setActiveTab("equal-share");
-    else setActiveTab("participants");
+    setActiveTab("links");
   };
 
   const handleAddParticipant = (participant: {
@@ -197,7 +156,7 @@ export const BookingWorkspacePage = () => {
               Create contribution plan
             </Button>
           }
-          description="Choose Equal Split, Equal Share Link, Open Contribution, or Hybrid to start collecting payments."
+          description="One plan includes open, equal share, and named participant links. Add people and track all payers in one place."
           icon={Wallet}
           title="No contribution plan yet"
         />
@@ -206,7 +165,7 @@ export const BookingWorkspacePage = () => {
           <Tabs
             activeTab={activeTab}
             onChange={setActiveTab}
-            tabs={visibleTabs}
+            tabs={workspaceTabs}
           />
 
           {activeTab === "overview" ? (
@@ -235,6 +194,18 @@ export const BookingWorkspacePage = () => {
               onPublish={() =>
                 dispatch({ type: "PUBLISH_PLAN", payload: { bookingId } })
               }
+              onRedistributeEqual={(includePaidParticipants) =>
+                dispatch({
+                  type: "REDISTRIBUTE_PARTICIPANTS_EQUAL",
+                  payload: { bookingId, includePaidParticipants },
+                })
+              }
+              onRedistributeManual={(allocations, includePaidParticipants) =>
+                dispatch({
+                  type: "REDISTRIBUTE_PARTICIPANTS_MANUAL",
+                  payload: { bookingId, allocations, includePaidParticipants },
+                })
+              }
               onRemoveParticipant={(participantId) =>
                 dispatch({
                   type: "REMOVE_PARTICIPANT",
@@ -256,15 +227,27 @@ export const BookingWorkspacePage = () => {
                   },
                 })
               }
+              onUpdateParticipantAmount={(participantId, amount, note) =>
+                dispatch({
+                  type: "UPDATE_PARTICIPANT_AMOUNT",
+                  payload: { bookingId, participantId, amount, note },
+                })
+              }
               plan={workingPlan}
             />
           ) : null}
 
-          {activeTab === "equal-share" ? (
-            <EqualSharePanel
+          {activeTab === "links" ? (
+            <ContributionLinksPanel
               isDraft={isDraft}
               onPublish={() =>
                 dispatch({ type: "PUBLISH_PLAN", payload: { bookingId } })
+              }
+              onSetShareAmount={(amount) =>
+                dispatch({
+                  type: "SET_EQUAL_SHARE_AMOUNT",
+                  payload: { bookingId, equalShareAmount: amount },
+                })
               }
               onSetShareCount={(count) =>
                 dispatch({
@@ -276,61 +259,20 @@ export const BookingWorkspacePage = () => {
             />
           ) : null}
 
-          {activeTab === "open" ? (
-            <div className="space-y-6">
-              <OpenContributionPanel plan={workingPlan} />
-              {isDraft && workingPlan.mode === "OPEN" ? (
-                <div className="flex justify-end">
-                  <Button
-                    onClick={() =>
-                      dispatch({ type: "PUBLISH_PLAN", payload: { bookingId } })
-                    }
-                  >
-                    Publish open contribution plan
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
           {activeTab === "recalculate" ? (
             <div className="space-y-6">
               <RecalculatePanel
                 currentPrice={getBookingTotal(booking)}
-                onRecalculateEqual={(
-                  newBookingTotal,
-                  includePaidParticipants,
-                  newMode,
-                  equalShareCount,
-                ) =>
+                onRedistributeEqual={(includePaidParticipants) =>
                   dispatch({
-                    type: "RECALCULATE_EQUAL",
-                    payload: {
-                      bookingId,
-                      newBookingTotal,
-                      includePaidParticipants,
-                      newMode,
-                      equalShareCount,
-                    },
+                    type: "REDISTRIBUTE_PARTICIPANTS_EQUAL",
+                    payload: { bookingId, includePaidParticipants },
                   })
                 }
-                onRecalculateManual={(
-                  allocations,
-                  newBookingTotal,
-                  includePaidParticipants,
-                  newMode,
-                  equalShareCount,
-                ) =>
+                onUpdateBookingPrice={(newBookingTotal) =>
                   dispatch({
-                    type: "RECALCULATE_MANUAL",
-                    payload: {
-                      bookingId,
-                      allocations,
-                      newBookingTotal,
-                      includePaidParticipants,
-                      newMode,
-                      equalShareCount,
-                    },
+                    type: "UPDATE_BOOKING",
+                    payload: { bookingId, price: newBookingTotal },
                   })
                 }
                 plan={activePlan}
