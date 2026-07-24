@@ -1,8 +1,10 @@
-import { Copy, Plus, Trash2, Users } from "lucide-react";
+import { Copy, Plus, RefreshCcw, Trash2, Users } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { ContributionPlan, ParticipantStatus } from "../../types";
+import type { ContributionPlan, Participant, ParticipantStatus } from "../../types";
 import { ContributionLink, Money, ParticipantStatusBadge } from "../../components/shared";
 import { getParticipantPaidAmount, getParticipantRemainingDue } from "../../store";
+import { ParticipantEditDialog } from "./ParticipantEditDialog";
+import { ParticipantsRecalculateDialog } from "./ParticipantsRecalculateDialog";
 import {
   Button,
   Card,
@@ -42,8 +44,31 @@ type ParticipantsPanelProps = {
     strategy: "equal" | "manual",
     allocations?: { participantId: string; amount: number }[],
   ) => void;
+  onUpdateParticipantAmount: (
+    participantId: string,
+    amount: number,
+    note?: string,
+  ) => void;
+  onRedistributeEqual: (includePaidParticipants: boolean) => void;
+  onRedistributeManual: (
+    allocations: { participantId: string; amount: number }[],
+    includePaidParticipants: boolean,
+  ) => void;
   onPublish: () => void;
   duplicateError?: string;
+};
+
+const getSourceLabel = (participant: Participant) => {
+  switch (participant.source) {
+    case "OPEN_LINK":
+      return "Open link";
+    case "EQUAL_SHARE":
+      return "Equal share";
+    case "NAMED_LINK":
+      return "Named link";
+    default:
+      return "Manual";
+  }
 };
 
 export const ParticipantsPanel = ({
@@ -53,6 +78,9 @@ export const ParticipantsPanel = ({
   onAddPublishedParticipant,
   onRemoveParticipant,
   onRemovePublishedParticipant,
+  onUpdateParticipantAmount,
+  onRedistributeEqual,
+  onRedistributeManual,
   onPublish,
   duplicateError,
 }: ParticipantsPanelProps) => {
@@ -60,7 +88,6 @@ export const ParticipantsPanel = ({
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [allocatedAmount, setAllocatedAmount] = useState("");
-  const [amountError, setAmountError] = useState("");
   const [departingParticipantId, setDepartingParticipantId] = useState<
     string | null
   >(null);
@@ -74,6 +101,9 @@ export const ParticipantsPanel = ({
   const [statusFilter, setStatusFilter] = useState<ParticipantStatus | "ALL">(
     "ALL",
   );
+  const [editingParticipant, setEditingParticipant] =
+    useState<Participant | null>(null);
+  const [recalculateOpen, setRecalculateOpen] = useState(false);
 
   const participants = useMemo(() => {
     if (!plan) return [];
@@ -93,33 +123,17 @@ export const ParticipantsPanel = ({
     event.preventDefault();
     if (!name.trim() || !email.trim()) return;
 
-    const amount = Number(allocatedAmount);
-    if (plan?.mode === "HYBRID") {
-      const allocatedTotal = plan.participants.reduce(
-        (total, participant) => total + participant.allocatedAmount,
-        0,
-      );
-      const openRemainder = plan.bookingTotal - allocatedTotal;
+    const amount = allocatedAmount.trim()
+      ? Number(allocatedAmount)
+      : undefined;
 
-      if (!Number.isFinite(amount) || amount <= 0) {
-        setAmountError("Enter an amount greater than €0.");
-        return;
-      }
+    if (amount != null && (!Number.isFinite(amount) || amount < 0)) return;
 
-      if (amount > openRemainder) {
-        setAmountError(
-          `Amount cannot exceed the unallocated balance of €${openRemainder.toFixed(2)}.`,
-        );
-        return;
-      }
-    }
-
-    setAmountError("");
     const payload = {
       name: name.trim(),
       email: email.trim(),
       phone: phone.trim() || undefined,
-      allocatedAmount: plan?.mode === "HYBRID" ? amount : undefined,
+      allocatedAmount: amount,
     };
 
     if (isDraft) {
@@ -198,20 +212,33 @@ export const ParticipantsPanel = ({
     handleCloseRemoval();
   };
 
-  if (!plan || plan.mode === "OPEN" || plan.mode === "EQUAL_SHARE") {
+  const handleRowClick = (participant: Participant) => {
+    setEditingParticipant(participant);
+  };
+
+  const handleRowKeyDown = (
+    event: React.KeyboardEvent<HTMLTableRowElement>,
+    participant: Participant,
+  ) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setEditingParticipant(participant);
+    }
+  };
+
+  if (!plan) {
     return (
       <EmptyState
-        description="Named participant management is not used for this contribution mode."
+        description="Create a contribution plan to manage participants."
         icon={Users}
-        title="No named participant tracking"
+        title="No participants yet"
       />
     );
   }
 
   return (
     <div className="space-y-6">
-      {(isDraft || plan.status === "PUBLISHED") &&
-      (plan.mode === "EQUAL_SPLIT" || plan.mode === "HYBRID") ? (
+      {(isDraft || plan.status === "PUBLISHED") ? (
         <Card>
           <CardHeader>
             <h3 className="text-lg font-semibold text-slate-900">
@@ -220,14 +247,12 @@ export const ParticipantsPanel = ({
             <p className="text-sm text-slate-500">
               {plan.status === "PUBLISHED"
                 ? "Adding after publish creates a new plan version and regenerates contribution links."
-                : plan.mode === "HYBRID"
-                  ? "Assign a fixed amount to each participant. The unallocated remainder is collected through the open link."
-                  : "Participants are manually managed and the booking total is divided equally."}{" "}
+                : "Add people manually with an optional contribution amount. Open and equal share payers appear here automatically after payment."}{" "}
               Duplicate emails are prevented.
             </p>
           </CardHeader>
           <CardContent>
-            <form className="grid gap-4 md:grid-cols-3" onSubmit={handleSubmit}>
+            <form className="grid gap-4 md:grid-cols-4" onSubmit={handleSubmit}>
               <Field htmlFor="participant-name" label="Name">
                 <Input
                   id="participant-name"
@@ -252,25 +277,21 @@ export const ParticipantsPanel = ({
                   value={phone}
                 />
               </Field>
-              {plan.mode === "HYBRID" ? (
-                <Field
-                  error={amountError}
-                  hint="The remaining booking balance stays available on the open link."
-                  htmlFor="participant-amount"
-                  label="Participant amount (€)"
-                >
-                  <Input
-                    id="participant-amount"
-                    min="0.01"
-                    onChange={(event) => setAllocatedAmount(event.target.value)}
-                    required
-                    step="0.01"
-                    type="number"
-                    value={allocatedAmount}
-                  />
-                </Field>
-              ) : null}
-              <div className="md:col-span-3 flex items-center justify-between gap-3">
+              <Field
+                hint="Optional — leave blank for €0 until you recalculate."
+                htmlFor="participant-amount"
+                label="Amount (€)"
+              >
+                <Input
+                  id="participant-amount"
+                  min="0"
+                  onChange={(event) => setAllocatedAmount(event.target.value)}
+                  step="0.01"
+                  type="number"
+                  value={allocatedAmount}
+                />
+              </Field>
+              <div className="md:col-span-4 flex items-center justify-between gap-3">
                 {duplicateError ? (
                   <p className="text-sm text-danger-600">{duplicateError}</p>
                 ) : (
@@ -290,7 +311,7 @@ export const ParticipantsPanel = ({
         <CardHeader className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-lg font-semibold text-slate-900">
-              Participants
+              All payers
             </h3>
             <p className="text-sm text-slate-500">
               {
@@ -300,32 +321,40 @@ export const ParticipantsPanel = ({
                     participant.status !== "EXPIRED",
                 ).length
               }{" "}
-              active participant(s) ·{" "}
-              {plan.mode === "HYBRID"
-                ? "custom participant amounts"
-                : "equal distribution"}
+              active · manual entries and link payers in one list · click a row
+              to edit amount
             </p>
           </div>
-          <Field className="w-48" htmlFor="status-filter" label="Filter status">
-            <Select
-              id="status-filter"
-              onChange={(event) =>
-                setStatusFilter(event.target.value as ParticipantStatus | "ALL")
-              }
-              value={statusFilter}
+          <div className="flex flex-wrap items-end gap-3">
+            <Field className="w-48" htmlFor="status-filter" label="Filter status">
+              <Select
+                id="status-filter"
+                onChange={(event) =>
+                  setStatusFilter(event.target.value as ParticipantStatus | "ALL")
+                }
+                value={statusFilter}
+              >
+                <option value="ALL">All statuses</option>
+                <option value="PENDING">Pending</option>
+                <option value="PAID">Paid</option>
+                <option value="CANCELLED">Cancelled</option>
+                <option value="EXPIRED">Expired</option>
+              </Select>
+            </Field>
+            <Button
+              aria-label="Recalculate participant amounts"
+              onClick={() => setRecalculateOpen(true)}
+              variant="secondary"
             >
-              <option value="ALL">All statuses</option>
-              <option value="PENDING">Pending</option>
-              <option value="PAID">Paid</option>
-              <option value="CANCELLED">Cancelled</option>
-              <option value="EXPIRED">Expired</option>
-            </Select>
-          </Field>
+              <RefreshCcw className="h-4 w-4" />
+              Recalculate
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           {participants.length === 0 ? (
             <EmptyState
-              description="Add participants to generate individual contribution links."
+              description="Add participants manually or share contribution links."
               icon={Users}
               title="No participants yet"
             />
@@ -335,6 +364,7 @@ export const ParticipantsPanel = ({
                 <TableRow>
                   <TableHeaderCell>Name</TableHeaderCell>
                   <TableHeaderCell>Email</TableHeaderCell>
+                  <TableHeaderCell>Source</TableHeaderCell>
                   <TableHeaderCell>Amount</TableHeaderCell>
                   <TableHeaderCell>Status</TableHeaderCell>
                   <TableHeaderCell>Link</TableHeaderCell>
@@ -343,11 +373,24 @@ export const ParticipantsPanel = ({
               </TableHead>
               <TableBody>
                 {participants.map((participant) => (
-                  <TableRow key={participant.id}>
+                  <TableRow
+                    key={participant.id}
+                    aria-label={`Edit ${participant.name}`}
+                    className="cursor-pointer hover:bg-slate-50"
+                    onClick={() => handleRowClick(participant)}
+                    onKeyDown={(event) => handleRowKeyDown(event, participant)}
+                    role="button"
+                    tabIndex={0}
+                  >
                     <TableCell className="font-medium text-slate-900">
                       {participant.name}
                     </TableCell>
                     <TableCell>{participant.email}</TableCell>
+                    <TableCell>
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
+                        {getSourceLabel(participant)}
+                      </span>
+                    </TableCell>
                     <TableCell>
                       <div>
                         <Money amount={participant.allocatedAmount} />
@@ -369,9 +412,14 @@ export const ParticipantsPanel = ({
                     <TableCell>
                       <ParticipantStatusBadge status={participant.status} />
                     </TableCell>
-                    <TableCell>
+                    <TableCell
+                      onClick={(event) => event.stopPropagation()}
+                    >
                       {plan.status === "PUBLISHED" &&
-                      participant.status === "PENDING" ? (
+                      participant.status === "PENDING" &&
+                      (participant.source === "MANUAL" ||
+                        participant.source === "NAMED_LINK" ||
+                        !participant.source) ? (
                         <div className="space-y-2">
                           <ContributionLink token={participant.linkToken} />
                           <Button
@@ -387,7 +435,9 @@ export const ParticipantsPanel = ({
                         <span className="text-slate-400">—</span>
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell
+                      onClick={(event) => event.stopPropagation()}
+                    >
                       {participant.status !== "CANCELLED" &&
                       participant.status !== "EXPIRED" ? (
                         <Button
@@ -417,13 +467,32 @@ export const ParticipantsPanel = ({
       {isDraft ? (
         <div className="flex justify-end">
           <Button
-            disabled={plan.participants.length === 0}
+            disabled={false}
             onClick={onPublish}
           >
             Publish contribution plan
           </Button>
         </div>
       ) : null}
+
+      {editingParticipant ? (
+        <ParticipantEditDialog
+          bookingTotal={plan.bookingTotal}
+          key={editingParticipant.id}
+          onClose={() => setEditingParticipant(null)}
+          onSave={onUpdateParticipantAmount}
+          open
+          participant={editingParticipant}
+        />
+      ) : null}
+
+      <ParticipantsRecalculateDialog
+        onClose={() => setRecalculateOpen(false)}
+        onRecalculateEqual={onRedistributeEqual}
+        onRecalculateManual={onRedistributeManual}
+        open={recalculateOpen}
+        plan={plan}
+      />
 
       <Dialog
         description="A new plan version will be published and all previous contribution links will be invalidated."

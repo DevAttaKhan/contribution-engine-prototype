@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 export const Table = ({
@@ -21,8 +21,14 @@ export const TableBody = ({ children }: { children: ReactNode }) => (
   <tbody className="divide-y divide-slate-100 bg-white">{children}</tbody>
 );
 
-export const TableRow = ({ children }: { children: ReactNode }) => (
-  <tr className="hover:bg-slate-50">{children}</tr>
+export const TableRow = ({
+  children,
+  className,
+  ...props
+}: ComponentPropsWithoutRef<"tr">) => (
+  <tr className={cn("hover:bg-slate-50", className)} {...props}>
+    {children}
+  </tr>
 );
 
 export const TableHeaderCell = ({
@@ -46,9 +52,9 @@ export const TableHeaderCell = ({
 export const TableCell = ({
   children,
   className,
-}: {
-  children: ReactNode;
-  className?: string;
-}) => (
-  <td className={cn("px-4 py-3 text-sm text-slate-700", className)}>{children}</td>
+  ...props
+}: ComponentPropsWithoutRef<"td">) => (
+  <td className={cn("px-4 py-3 text-sm text-slate-700", className)} {...props}>
+    {children}
+  </td>
 );
